@@ -1,0 +1,6 @@
+1.2.8
+
+*Program Pencere boyutu revize edildi.
+
+
+link=https://gitlab.com/saydut/encrpter/-/raw/main/mysetup.zip?ref_type=heads
