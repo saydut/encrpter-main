@@ -1,4 +1,4 @@
-import customtkinter as ctk
+﻿import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import os
@@ -8,10 +8,36 @@ import subprocess
 import sys
 import threading
 import zipfile
+import webbrowser
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+# Uygulama bilgisi ve güncelleme kaynağı
+APP_VERSION = "2.0"
+PROGRAMS_URL = "https://www.saydut.com/static/programs.json"
+PROGRAM_ID = "saydut-kripto"
+
+
+def _semver_tuple(v: str) -> tuple[int, int, int]:
+    v = (v or "").strip()
+    if v.startswith("v"):
+        v = v[1:]
+    parts = v.split(".")
+    out = []
+    for i in range(3):
+        try:
+            out.append(int(parts[i]))
+        except Exception:
+            out.append(0)
+    return tuple(out)  # type: ignore
+
+
+def _http_get_json(url: str, timeout: int = 15) -> dict:
+    response = requests.get(url, timeout=timeout)
+    response.raise_for_status()
+    return response.json()
 
 # --- GÖRÜNÜM AYARLARI ---
 ctk.set_appearance_mode("Dark")  # Mod: "System" (standart), "Dark", "Light"
@@ -27,10 +53,12 @@ class ModernApp(ctk.CTk):
         self.resizable(False, False)
         
         # İkon (Varsa .ico dosyası eklenebilir, yoksa varsayılan kalır)
-        # self.iconbitmap('icon.ico')
 
         self.create_ui()
-        
+        self.is_busy = False
+        self._update_prompted = False
+        self.after(1500, self.check_launcher_update_background)
+
     def create_ui(self):
         # --- BAŞLIK ALANI ---
         self.header_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
@@ -80,10 +108,10 @@ class ModernApp(ctk.CTk):
         btn_frame = ctk.CTkFrame(tab, fg_color="transparent")
         btn_frame.pack(fill="x", padx=10)
 
-        self.encrypt_file_btn = ctk.CTkButton(btn_frame, text="🔒 Dosya Şifrele", command=self.encrypt, height=45, fg_color="#ef4444", hover_color="#b91c1c")
+        self.encrypt_file_btn = ctk.CTkButton(btn_frame, text="Dosya Şifrele", command=self.encrypt, height=45, fg_color="#ef4444", hover_color="#b91c1c")
         self.encrypt_file_btn.pack(side="left", expand=True, padx=5, fill="x")
 
-        self.decrypt_file_btn = ctk.CTkButton(btn_frame, text="🔓 Dosya Çöz", command=self.decrypt, height=45, fg_color="#22c55e", hover_color="#15803d")
+        self.decrypt_file_btn = ctk.CTkButton(btn_frame, text="Dosya Çöz", command=self.decrypt, height=45, fg_color="#22c55e", hover_color="#15803d")
         self.decrypt_file_btn.pack(side="right", expand=True, padx=5, fill="x")
 
     def setup_folder_tab(self):
@@ -95,10 +123,10 @@ class ModernApp(ctk.CTk):
         btn_frame = ctk.CTkFrame(tab, fg_color="transparent")
         btn_frame.pack(fill="x", padx=10)
 
-        self.encrypt_folder_btn = ctk.CTkButton(btn_frame, text="🔒 Klasör Şifrele", command=self.encrypt_folder, height=45, fg_color="#ef4444", hover_color="#b91c1c")
+        self.encrypt_folder_btn = ctk.CTkButton(btn_frame, text="Klasör Şifrele", command=self.encrypt_folder, height=45, fg_color="#ef4444", hover_color="#b91c1c")
         self.encrypt_folder_btn.pack(side="left", expand=True, padx=5, fill="x")
 
-        self.decrypt_folder_btn = ctk.CTkButton(btn_frame, text="🔓 Klasör Çöz", command=self.decrypt_folder, height=45, fg_color="#22c55e", hover_color="#15803d")
+        self.decrypt_folder_btn = ctk.CTkButton(btn_frame, text="Klasör Çöz", command=self.decrypt_folder, height=45, fg_color="#22c55e", hover_color="#15803d")
         self.decrypt_folder_btn.pack(side="right", expand=True, padx=5, fill="x")
 
     # --- KRİPTOGRAFİ MANTIKLARI (Değişmedi) ---
@@ -106,6 +134,42 @@ class ModernApp(ctk.CTk):
     def log(self, message, is_error=False):
         self.status_label.configure(text=message, text_color="#ef4444" if is_error else "gray")
         self.update_idletasks()
+
+    def show_update_prompt(self, latest_version: str) -> None:
+        if self._update_prompted:
+            return
+        self._update_prompted = True
+        top = ctk.CTkToplevel(self)
+        top.title("Güncelleme mevcut")
+        top.geometry("520x240")
+        top.resizable(False, False)
+        top.grab_set()
+        ctk.CTkLabel(top, text="Güncelleme mevcut", font=("Roboto Medium", 18)).pack(pady=(18, 10))
+        ctk.CTkLabel(
+            top,
+            text=f"Mevcut sürüm: {APP_VERSION}\nYeni sürüm: {latest_version}",
+            font=("Roboto", 13),
+        ).pack(pady=(0, 16))
+        row = ctk.CTkFrame(top, fg_color="transparent")
+        row.pack(pady=(4, 12))
+        ctk.CTkButton(row, text="Launcher aç", width=140, command=lambda: (top.destroy(), self.prog_ver_check())).pack(side="left", padx=8)
+        ctk.CTkButton(row, text="Sonra", width=120, command=top.destroy).pack(side="left", padx=8)
+
+    def check_launcher_update_background(self) -> None:
+        def worker():
+            try:
+                payload = _http_get_json(PROGRAMS_URL)
+                latest = None
+                for item in payload.get("programs", []):
+                    if item.get("id") == PROGRAM_ID:
+                        latest = item.get("version", "")
+                        break
+                if latest and _semver_tuple(latest) > _semver_tuple(APP_VERSION):
+                    self.after(0, lambda: self.show_update_prompt(latest))
+            except Exception:
+                return
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def key_derivation(self, password, salt):
         kdf = PBKDF2HMAC(
@@ -117,14 +181,15 @@ class ModernApp(ctk.CTk):
     def encrypt_file(self, file_path, password):
         try:
             salt = os.urandom(16)
+            nonce = os.urandom(12)
             key = self.key_derivation(password, salt)
             with open(file_path, 'rb') as f: plaintext = f.read()
             
-            cipher = Cipher(algorithms.AES(key), modes.GCM(salt), backend=default_backend())
+            cipher = Cipher(algorithms.AES(key), modes.GCM(nonce), backend=default_backend())
             encryptor = cipher.encryptor()
             ciphertext = encryptor.update(plaintext) + encryptor.finalize()
 
-            with open(file_path + '.enc', 'wb') as f: f.write(encryptor.tag + salt + ciphertext)
+            with open(file_path + '.enc', 'wb') as f: f.write(encryptor.tag + nonce + salt + ciphertext)
             os.remove(file_path)
             return True
         except Exception as e:
@@ -134,10 +199,10 @@ class ModernApp(ctk.CTk):
     def decrypt_file(self, encrypted_file_path, password):
         try:
             with open(encrypted_file_path, 'rb') as f: data = f.read()
-            tag, salt, ciphertext = data[:16], data[16:32], data[32:]
+            tag, nonce, salt, ciphertext = data[:16], data[16:28], data[28:44], data[44:]
             
             key = self.key_derivation(password, salt)
-            cipher = Cipher(algorithms.AES(key), modes.GCM(salt, tag), backend=default_backend())
+            cipher = Cipher(algorithms.AES(key), modes.GCM(nonce, tag), backend=default_backend())
             decryptor = cipher.decryptor()
             plaintext = decryptor.update(ciphertext) + decryptor.finalize()
 
@@ -156,87 +221,180 @@ class ModernApp(ctk.CTk):
 
     # --- BUTON AKSİYONLARI ---
 
+    def set_busy(self, busy: bool):
+        self.is_busy = busy
+        state = "disabled" if busy else "normal"
+        for btn in (
+            self.encrypt_file_btn,
+            self.decrypt_file_btn,
+            self.encrypt_folder_btn,
+            self.decrypt_folder_btn,
+            self.update_btn,
+        ):
+            btn.configure(state=state)
+
+    def run_task(self, task, on_done):
+        if self.is_busy:
+            return
+        self.set_busy(True)
+
+        def worker():
+            try:
+                result = task()
+                self.after(0, lambda: self._task_done(on_done, result))
+            except Exception as exc:
+                self.after(0, lambda: self._task_failed(str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _task_done(self, on_done, result):
+        self.set_busy(False)
+        on_done(result)
+
+    def _task_failed(self, message):
+        self.set_busy(False)
+        self.log("Hata oluştu!", True)
+        messagebox.showerror("Hata", message)
+
     def encrypt(self):
         pwd = self.get_password()
-        if not pwd: return
-        
+        if not pwd:
+            return
+
         file_path = filedialog.askopenfilename()
         if file_path:
-            self.log("Şifreleniyor...")
-            if self.encrypt_file(file_path, pwd):
-                self.log("İşlem Başarılı: Dosya şifrelendi.")
-                messagebox.showinfo("Başarılı", "Dosya güvenli bir şekilde şifrelendi.")
-            else:
-                self.log("Hata oluştu!", True)
+            self.log("İşlem başlıyor...")
+
+            def task():
+                return self.encrypt_file(file_path, pwd)
+
+            def done(success):
+                if success:
+                    self.log("İşlem başarılı: Dosya şifrelendi.")
+                    messagebox.showinfo("Başarılı", "Dosya güvenli bir şekilde şifrelendi.")
+                else:
+                    self.log("Hata oluştu!", True)
+                    messagebox.showerror("Hata", "İşlem başarısız.")
+
+            self.run_task(task, done)
 
     def decrypt(self):
         pwd = self.get_password()
-        if not pwd: return
-        
+        if not pwd:
+            return
+
         file_path = filedialog.askopenfilename(filetypes=[("Encrypted Files", "*.enc")])
         if file_path:
-            self.log("Şifre Çözülüyor...")
-            if self.decrypt_file(file_path, pwd):
-                self.log("İşlem Başarılı: Dosya çözüldü.")
-                messagebox.showinfo("Başarılı", "Dosya orijinal haline döndü.")
-            else:
-                self.log("Hata: Yanlış parola!", True)
-                messagebox.showerror("Hata", "Şifre çözülemedi. Parolayı kontrol edin.")
+            self.log("İşlem başlıyor...")
+
+            def task():
+                return self.decrypt_file(file_path, pwd)
+
+            def done(success):
+                if success:
+                    self.log("İşlem başarılı: Dosya çözüldü.")
+                    messagebox.showinfo("Başarılı", "Dosya orijinal haline döndü.")
+                else:
+                    self.log("Hata: Yanlış parola!", True)
+                    messagebox.showerror("Hata", "Şifre çözülmedi. Parolayı kontrol edin.")
+
+            self.run_task(task, done)
 
     def encrypt_folder(self):
         pwd = self.get_password()
-        if not pwd: return
-        
+        if not pwd:
+            return
+
         folder = filedialog.askdirectory()
         if folder:
-            self.log("Klasör taranıyor...")
-            count = 0
-            for root, _, files in os.walk(folder):
-                for file in files:
-                    if not file.endswith('.enc'):
-                        if self.encrypt_file(os.path.join(root, file), pwd):
-                            count += 1
-            self.log(f"Tamamlandı: {count} dosya şifrelendi.")
-            messagebox.showinfo("Toplu İşlem", f"{count} dosya şifrelendi.")
+            self.log("İşlem başlıyor...")
+
+            def task():
+                count = 0
+                for root, _, files in os.walk(folder):
+                    for file in files:
+                        if not file.endswith(".enc"):
+                            if self.encrypt_file(os.path.join(root, file), pwd):
+                                count += 1
+                return count
+
+            def done(count):
+                self.log(f"Tamamlandı: {count} dosya şifrelendi.")
+                messagebox.showinfo("Toplu İşlem", f"{count} dosya şifrelendi.")
+
+            self.run_task(task, done)
 
     def decrypt_folder(self):
         pwd = self.get_password()
-        if not pwd: return
-        
+        if not pwd:
+            return
+
         folder = filedialog.askdirectory()
         if folder:
-            self.log("Klasör taranıyor...")
-            count = 0
-            fail = 0
-            for root, _, files in os.walk(folder):
-                for file in files:
-                    if file.endswith('.enc'):
-                        if self.decrypt_file(os.path.join(root, file), pwd):
-                            count += 1
-                        else:
-                            fail += 1
-            self.log(f"Bitti: {count} çözüldü, {fail} hata.")
-            messagebox.showinfo("Rapor", f"{count} dosya başarıyla çözüldü.\n{fail} dosya çözülemedi (yanlış şifre olabilir).")
+            self.log("İşlem başlıyor...")
 
-    # --- GÜNCELLEME SİSTEMİ (Orijinal Koddan) ---
+            def task():
+                count = 0
+                fail = 0
+                for root, _, files in os.walk(folder):
+                    for file in files:
+                        if file.endswith(".enc"):
+                            if self.decrypt_file(os.path.join(root, file), pwd):
+                                count += 1
+                            else:
+                                fail += 1
+                return count, fail
+
+            def done(result):
+                count, fail = result
+                self.log(f"Bitti: {count} çözüldü, {fail} hata.")
+                messagebox.showinfo("Rapor", f"{count} dosya başarıyla çözüldü.\n{fail} dosya çözülemedi.")
+
+            self.run_task(task, done)
+
     def prog_ver_check(self):
-        self.log("Sunucu kontrol ediliyor...")
-        # Demo amaçlı basit kontrol, orijinal mantığını buraya yapıştırabilirsin.
-        # GUI donmaması için bunu thread içinde çalıştırmak en iyisidir.
-        threading.Thread(target=self._check_update_thread, daemon=True).start()
+        launcher_hint_path = r"C:\Saydut\launcher_path.txt"
+        launcher_candidates = [
+            r"C:\Saydut\SaydutLauncher\SaydutLauncher.exe",
+            r"C:\Saydut\Saydut Launcher\SaydutLauncher.exe",
+            r"C:\Saydut\SaydutLauncher\Saydut Launcher.exe",
+        ]
 
-    def _check_update_thread(self):
-        try:
-            # Buraya requests kodlarını koy
-            # Örnek:
-            # response = requests.get("gitlab_url...")
-            # ...
-            # GUI'yi güncellemek için:
-            # self.after(0, lambda: messagebox.showinfo("Bilgi", "Sistem Güncel"))
-            self.log("Sistem Güncel")
-        except Exception:
-            self.log("Sunucuya ulaşılamadı", True)
+        launcher_path = None
+        if os.path.exists(launcher_hint_path):
+            try:
+                with open(launcher_hint_path, "r", encoding="utf-8") as handle:
+                    candidate = handle.read().strip()
+                if candidate and os.path.exists(candidate):
+                    launcher_path = candidate
+            except OSError:
+                launcher_path = None
+
+        if not launcher_path:
+            launcher_path = next((p for p in launcher_candidates if os.path.exists(p)), None)
+
+        if launcher_path:
+            self.log("Güncelleme için Saydut Launcher açılıyor...")
+            try:
+                if launcher_path.lower().endswith(".py"):
+                    subprocess.Popen([sys.executable, launcher_path])
+                else:
+                    subprocess.Popen([launcher_path])
+            except Exception as exc:
+                self.log("Launcher açılamadı.", True)
+                messagebox.showerror("Hata", f"Launcher açılamadı:\n{exc}")
+            return
+
+        self.log("Launcher bulunamadı.", True)
+        messagebox.showinfo(
+            "Launcher Gerekli",
+            "Güncelleme için Saydut Launcher gerekli.\nİndirip kurduktan sonra tekrar deneyin.",
+        )
+        webbrowser.open("https://www.saydut.com")
 
 if __name__ == "__main__":
     app = ModernApp()
     app.mainloop()
+
+
+
